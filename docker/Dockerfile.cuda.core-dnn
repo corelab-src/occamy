@@ -1,0 +1,142 @@
+FROM ubuntu:20.04
+
+WORKDIR /workdir
+ENV HOME=/workdir
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1) Install packages.
+ENV PATH=$PATH:${HOME}/bin
+RUN apt-get update
+RUN apt-get install -y python3
+RUN apt-get install -y dpkg
+RUN apt-get install -y apt-utils
+RUN apt-get install -y python-numpy
+RUN apt-get install -y python3-pip
+RUN apt-get install -y python-is-python3
+RUN python -m pip install --upgrade pip
+RUN apt-get install -y gdb lldb
+RUN apt-get install -y emacs vim git wget
+
+
+# 2) Instal optional packages, uncomment/add as you see fit.
+RUN apt-get install -y valgrind
+RUN apt-get install -y libeigen3-dev
+RUN apt-get install -y clang-format
+RUN python -m pip install wheel
+RUN python -m pip install numpy
+RUN git clone https://github.com/onnx/tutorials.git
+
+# Install CUDA 12.1 and CUDNN 8.9.0
+WORKDIR /root
+RUN apt-get update
+RUN apt-get -y install gnupg
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-ubuntu2004.pin
+RUN mv cuda-ubuntu2004.pin /etc/apt/preferences.d/cuda-repository-pin-600
+RUN wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-repo-ubuntu2004-11-8-local_11.8.0-520.61.05-1_amd64.deb
+RUN dpkg -i cuda-repo-ubuntu2004-11-8-local_11.8.0-520.61.05-1_amd64.deb
+RUN cp /var/cuda-repo-ubuntu2004-11-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
+RUN apt-get update
+RUN apt-get -y install cuda
+
+# Copy CUDNN 8.9 library and install library
+COPY docker/cudnn-linux-x86_64-8.9.0.131_cuda11-archive.tar.xz /root
+RUN tar xvf cudnn-linux-x86_64-8.9.0.131_cuda11-archive.tar.xz 
+RUN cp cudnn-*-archive/include/cudnn*.h /usr/local/cuda/include 
+RUN cp -P cudnn-*-archive/lib/libcudnn* /usr/local/cuda/lib64 
+RUN chmod a+r /usr/local/cuda/include/cudnn*.h /usr/local/cuda/lib64/libcudnn*
+
+# Install PyTorch with CUDA
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# install ONNXRuntime
+RUN python -m pip install onnxruntime
+
+# set Nvidia docker environment vars
+ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
+ENV NVIDIA_REQUIRE_CUDA "cuda>=8.0"
+ENV MAKEFLAGS -j8
+
+# Pull and build llvm working version
+WORKDIR ${HOME}
+RUN git clone https://github.com/llvm/llvm-project.git
+WORKDIR ${HOME}/llvm-project
+RUN git pull origin main
+RUN git checkout 21f4b84c456b471cc52016cf360e14d45f7f2960
+RUN apt-get install -y ninja-build
+WORKDIR ${HOME}/llvm-project/build
+RUN cmake -G Ninja ../llvm \
+  -DLLVM_ENABLE_PROJECTS="mlir;clang" \
+  -DLLVM_TARGETS_TO_BUILD="host" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DLLVM_ENABLE_RTTI=ON
+RUN cmake --build . -- -j32
+RUN cmake --build . --target check-mlir
+
+# Install prerequisites for the core-dnn DNN compiler
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+## Java default version
+RUN apt-get install -y default-jdk
+## Protobuf v3.20.3
+WORKDIR /root
+RUN mkdir -p applications
+WORKDIR /root/applications
+RUN apt-get install -y build-essential autoconf libtool pkg-config
+RUN git clone https://github.com/protocolbuffers/protobuf.git
+WORKDIR /root/applications/protobuf
+RUN git submodule update --init --recursive; git fetch origin --tags; git checkout tags/v3.20.3
+RUN ./autogen.sh
+RUN ./configure
+RUN make -j32
+RUN make install
+RUN ldconfig
+
+# Clean-build core-dnn DNN compiler
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64:
+ENV PATH=$PATH:/usr/local/cuda/bin
+WORKDIR ${HOME}
+RUN python -m pip install onnx
+COPY . ${HOME}/core-dnn
+WORKDIR ${HOME}/core-dnn
+RUN mkdir -p ${HOME}/core-dnn/build
+ENV MLIR_DIR=${HOME}/llvm-project/build/lib/cmake/mlir
+WORKDIR ${HOME}/core-dnn/build
+RUN cmake -G Ninja ..
+RUN cmake --build . --target core-dnn -j32
+
+
+# 3) Install extra pip modules
+RUN python -m pip install onnx onnxruntime pytorch-pretrained-bert scipy pandas tensorboardX scikit-image
+
+
+# 4) Set the PATH environment vars for make/debug mode. Replace Debug
+#    with Release in the PATH below when using Release mode.
+WORKDIR ${HOME}
+ENV NPROC=8
+ENV PATH=$PATH:${HOME}/core-dnn/build/Debug/bin/:${HOME}/core-dnn/build/Debug/lib:${HOME}/llvm-project/build/bin
+ENV PATH=$PATH:${HOME}/miniconda/bin
+ENV CORE_DNN_BUILD_PATH ${HOME}/core-dnn/build/Debug/
+ENV LLVM_PROJ_SRC ${HOME}/llvm-project/
+ENV LLVM_PROJ_BUILD ${HOME}/llvm-project/build
+
+
+# 5) Copy bash config to workdir
+RUN cp /root/.bashrc /workdir
+
+
+# 6) Add onnx mlir & llvm  make command
+RUN touch /usr/local/bin/corednn-build
+RUN echo "mkdir -p ${HOME}/core-dnn/build" >> /usr/local/bin/corednn-build
+RUN echo "cd ${HOME}/core-dnn/build" >> /usr/local/bin/corednn-build
+RUN echo "cmake -G Ninja .. \ncmake --build . --target core-dnn -j32" >> /usr/local/bin/corednn-build
+RUN chmod +x /usr/local/bin/corednn-build
+
+RUN touch /usr/local/bin/llvm-build
+RUN echo "mkdir -p ${HOME}/llvm-project/build" >> /usr/local/bin/llvm-build
+RUN echo "cd ${HOME}/llvm-project/build" >> /usr/local/bin/llvm-build
+RUN echo "cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS=\"mlir\;clang\" -DLLVM_TARGETS_TO_BUILD=\"host\" -DCMAKE_BUILD_TYPE=Debug -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_RTTI=ON" >> /usr/local/bin/llvm-build
+RUN echo "cmake --build . -- -j32" >> /usr/local/bin/llvm-build
+RUN chmod +x /usr/local/bin/llvm-build
+
+
