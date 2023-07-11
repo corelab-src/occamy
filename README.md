@@ -1,5 +1,24 @@
 # DNN Compiler
 
+## Abstract
+This work proposes Occamy, a new memory-efficient DNN compiler that reduces the
+memory usage of a DNN model without affecting its accuracy. For each DNN
+operation, Occamy analyzes dimensions of input and output tensors, and their
+liveness within the operation. Across all the operations, Occamy analyzes
+liveness of all the tensors, generates a memory pool after calculating the
+maximum required memory size, and schedules when and where to place each tensor
+in the memory pool. Compared to PyTorch, on an integrated embedded GPU for six
+DNNs, Occamy reduces the memory usage by 33.75% while achieving the 1.365 times
+geomean speedup.
+
+## Paper
+Jaeho Lee, Shinnung Jeong, Seungbin Song, Kunwoo Kim, Heelim Choi, Youngsok Kim
+and Hanjun Kim, **Occamy: Memory-efficient GPU Compiler for DNN Inference**,
+DAC 2023
+
+[Paper
+link](https://60dac.conference-program.com/presentation/?id=RESEARCH943&sess=sess121)
+
 ## Building an Image
 This repository contains Dockerfile (occamy-docker) to build an onnx-mlir image with CUDA and CUDNN enabled. Follow these steps to build it.
 
